@@ -218,5 +218,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-#ignore this folder 
+#ignore these folder 
 /sample-logs/
+
+information.txt
