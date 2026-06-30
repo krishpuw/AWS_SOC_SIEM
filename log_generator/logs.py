@@ -9,7 +9,7 @@ OUTPUT_DIR = "sample-logs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Known malicious IPs (simulate threat intel hits)
-MALICIOUS_IPS = ["185.220.101.45", "45.33.32.156", "103.21.244.0", "198.54.117.197"]
+MALICIOUS_IPS = ["185.220.101.45", "45.33.32.156", "103.21.244.0", "198.54.117.197",  "91.108.4.1", "179.60.147.31", "103.216.221.19",]
 NORMAL_IPS     = [f"192.168.1.{i}" for i in range(1, 20)] + \
                  [f"10.0.0.{i}" for i in range(1, 10)]
 ALL_IPS        = MALICIOUS_IPS + NORMAL_IPS
