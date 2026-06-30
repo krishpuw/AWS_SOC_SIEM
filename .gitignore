@@ -221,8 +221,10 @@ __marimo__/
 #ignore these folder 
 /sample-logs/
 
-information.txt
+/information.txt/
+
 
 /threat_intel/threat_work_handler.py
 
 /.env/
+
