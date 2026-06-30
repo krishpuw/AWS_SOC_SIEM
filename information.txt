@@ -1,0 +1,93 @@
+Mitre tatic (why) technique (how)
+
+SSH brute force Credential Access T1110.001
+Port scan. Reconnaissance.     T1046
+Failed Windows loginsCredential Access T1110
+SQL injection attemptInitial Access T1190
+Directory traversal Discovery.  T1083
+
+
+Project Idea
+
+SIEM-> security information event mangement 
+
+Logs come in (generate_logs.py creates realistic mock data)
+Parser runs detection rules, normalization of the data AWS Lambda can do this 
+Alert gets MITRE-tagged (T1110, T1046) which MITRE tagged technique is being used for this attack 
+Threat intel enriches  Enrichment , to tell what does it mean 
+    Under these: it checks the ip :- meaning is it from threat intel blocklist , what country is it from , which interent service provider (ASN) owns it 
+    user:- is it user account or real person , do they normally log in this time or are they privlegded users 
+    threat intel :- is this IP been seen in malware campaigns and does hashmap to known ransomware sample 
+
+    When this gets alerted VIRUS TOTAL and ABUSEIPDB gives the data of the threat , confidence , fllagged 
+
+    Threat intel lambda will do it and VIRUS TOTAL AND ABUIPDB is our enrichment trustees 
+
+
+DynamoDB stores the enriched alert
+
+    Now this where the rules are stored of the threat from which is given from threat intel to look for patterns to indicate an attack 
+
+    Rule Based Detection:- if x happens y timems in z minutes shoot an alert  -> it doesnt usualy catch a never seen attack  
+    Threshold based:- volume if data transfer exceeds from 1gb in hr , alert 
+    UEBA :- builds a baseline of normal behaviour attack analysis if a users logins from nyc at 9 am usually and randomly from russia at 3 am , can indicate a comprised account that rule based detection misses 
+
+    Projecgt there are 10 detection rules (BF brute force -: count of failures ) , port scan ( count of distinct ports), sqli ( string matching on paylod)\
+
+    BUT CAN ADD more maybe using a file  as data too ? 
+
+    After the rule is fired SIEM a alert like what happened event summar , when it happend , what assets are involved , how severe it is , whihc ATTACK , raw logs 
+
+    and then it is fed into a ticketing system JIRA or Service now ( CAN implement something like this on the website ? )
+
+    Dynamo DB stores the alerrts , website dashboard showcases them and its ATTA&K tag  and also shows the enrichment data 
+
+Dashboard surfaces it to an analyst (severity, technique, IP reputation)
+
+
+Step 6 :- Investegation and threat hunting 
+    Need to query the SIEM for more context?
+        show me all activity from thid IP in last 24 hours
+        all logins by THE user this week
+    
+    In different siems it used as like SPLUNK :- SPL ( search processing language )
+    Microsoft Sentinel KQL (Kusto Query Language)
+
+    In my project it would querying DynamoDB or raw S3 logs
+
+    Threat hunting is proactively searching raw data based on an educated guess to find hidden attacks that automated alerts missed.
+
+        Proactive: You actively seek out threats rather than waiting for alarms to go off.
+
+        Hypothesis-driven: You start with a specific theory of what an attacker might be doing.
+
+        Deep Dive: You analyze raw logs to uncover malicious activity that slipped past automated defenses.
+
+    Incident Response:- is reactive - waiting for an alert to fire 
+
+
+SIEM catches an attack- 
+        Reconnaissance — port scans, service enumeration. Your rule: distinct_ports > 10 from one IP. MITRE T1046.
+        Initial Access — brute force, phishing link clicked, exploited public-facing app. Your rules: failed login count, SQLi string in web log. MITRE T1110, T1190.
+        Execution — malicious script runs, PowerShell downloads payload. Detected via endpoint logs (process creation events, command line arguments). MITRE T1059.
+        Persistence — attacker creates a backdoor user, adds a scheduled task, installs a service. Detected via Windows Event 4720 (new account created), 4698 (scheduled task). MITRE T1136, T1053.
+        Privilege Escalation — attacker moves from standard user to admin. Detected via Event 4672 (special privileges assigned), 4728 (user added to privileged group). MITRE T1068.
+        Lateral Movement — attacker pivots from compromised host to other internal systems. Detected via unusual internal RDP/SMB connections, pass-the-hash patterns. MITRE T1021.
+        Exfiltration — large data transfer out, unusual destination, data staged in archive files. Detected via threshold rules on outbound bytes, DNS tunneling patterns. MITRE T1048.
+
+
+HOW THIS PROJECT CORELATES WITH SOC 
+
+
+
+SYSlog/log shiiper Fluetnd, filebeat -> generate log does 
+log Storage (s3, elastic) -> S3 Bucket 
+SIEM parsing engine -> lambda parser
+detection rules (SPL,KQL,Sigma) -> handler.py
+threat intel platform MALWARE INFORMATION SHARING PLATFORM -> threat intel lambda + virus toal , ABUSEIPDB
+Alert db -> dynamo db 
+SOC analyst console -> flask dashboard 
+MITRE ATTACK mapping -> tags on every alert 
+
+
+SIEM does :- collect -> normalize -> enrich -> correlate -> alert -> investigate 

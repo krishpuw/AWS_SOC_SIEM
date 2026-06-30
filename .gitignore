@@ -222,3 +222,7 @@ __marimo__/
 /sample-logs/
 
 information.txt
+
+/threat_intel/threat_work_handler.py
+
+/.env/
