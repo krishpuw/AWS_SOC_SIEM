@@ -1,0 +1,222 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31 
+
+# sam deploy , sam build in sam cli 
+Parameters:
+ 
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Deployment environment
+ 
+  VirusTotalApiKey:
+    Type: String
+    NoEcho: true
+    Description: VirusTotal API key
+ 
+  AbuseIpDbApiKey:
+    Type: String
+    NoEcho: true
+    Description: AbuseIPDB API key
+ 
+  ThreatIntelSchedule:
+    Type: String
+    Default: rate(15 minutes)
+    Description: enrich new alerst every 15 mins threat intel 
+
+
+Globals:
+  Function:
+    Runtime: python3.13
+    MemorySize: 256
+    Timeout: 60
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        DYNAMODB_TABLE_NAME: !Ref AlertsTable
+
+
+
+Resources:
+
+  #s3 
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "cloud-siem-logs-${dev}-${AWS::072456928630}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldLogs
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      VersioningConfiguration: # no overwritting polcy 
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: cloud-siem
+        - Key: Environment
+          Value: !Ref Environment
+
+  # alerts table in dynamodb
+   AlertsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "security-alerts-${Environment}"
+      BillingMode: PAY_PER_REQUEST #on demand 
+      AttributeDefinitions:
+        - AttributeName: alert_id
+          AttributeType: S
+        - AttributeName: severity
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: alert_id
+          KeyType: HASH
+      
+      # querying by severity directly 
+      GlobalSecondaryIndexes:
+        - IndexName: severity-timestamp-index
+          KeySchema:
+            - AttributeName: severity
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        
+      # auto deleting resolved alerts past 90  days 
+       TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: cloud-siem
+        - Key: Environment
+          Value: !Ref Environment
+    
+
+  
+# aws lamabda -> for parser and threat detection , triggered by s3 
+
+ParserDetectorFunction:
+  Type: AWS::Serverless::Function
+  Properties:
+      FunctionName: !Sub "siem-parser-detector-${Environment}"
+      CodeUri: lambda/parser-detector/
+      Handler: handler.lambda_handler
+      Description: >
+       runs dectection rules from s3 and tags alerts to db 
+  # IAM role ( user is created for this )
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref LogsBucket
+        - DynamoDBWritePolicy:
+            TableName: !Ref AlertsTable
+      # triggers event 
+      Events:
+        S3LogUpload:
+          Type: S3
+          Properties:
+            Bucket: !Ref LogsBucket
+            Events: s3:ObjectCreated:*
+            Filter: #only json file
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .json
+      Environment:
+        Variables:
+          LOG_BUCKET: !Ref LogsBucket
+      Tags:
+        Project: cloud-siem
+        Environment: !Ref Environment
+
+
+# lambda 2 for threat intel enrichment 
+
+ ThreatIntelFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "siem-threat-intel-${Environment}"
+      CodeUri: lambda/threat-intel/
+      Handler: handler.lambda_handler
+       Description: >
+        scans db for unenriched alers ,  quesis is based on updates from  vt and abuse and write enriches to alerts tablle 
+      Timeout: 300 
+      # iam role read db and write 
+       Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AlertsTable
+
+      Events:
+        EnrichmentSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ThreatIntelSchedule
+            Name: !Sub "siem-threat-intel-schedule-${Environment}"
+            Description: Periodically enrich new alerts with threat intel
+            Enabled: true
+      Environment:
+        Variables:
+          VIRUSTOTAL_API_KEY: !Ref VirusTotalApiKey
+          ABUSEIPDB_API_KEY: !Ref AbuseIpDbApiKey
+          AWS_REGION_NAME: !Ref AWS::Region
+      Tags:
+        Project: cloud-siem
+        Environment: !Ref Environment
+  
+
+# gives the IAm permissiont o s3 on triggered from labda 1 s3 needs to be a IAM user 
+ ParserDetectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ParserDetectorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt LogsBucket.Arn
+      
+      SourceAccount: !Ref AWS::072456928630
+
+
+
+Outputs:
+ 
+  LogsBucketName:
+    Description: Upload logs here to trigger the parser Lambda
+    Value: !Ref LogsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-LogsBucket"
+ 
+  AlertsTableName:
+    Description: DynamoDB table storing all alerts
+    Value: !Ref AlertsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-AlertsTable"
+ 
+  AlertsTableArn:
+    Description: ARN of the alerts DynamoDB table
+    Value: !GetAtt AlertsTable.Arn
+ 
+  ParserDetectorFunctionArn:
+    Description: ARN of the parser/detector Lambda
+    Value: !GetAtt ParserDetectorFunction.Arn
+ 
+  ThreatIntelFunctionArn:
+    Description: ARN of the threat intel Lambda
+    Value: !GetAtt ThreatIntelFunction.Arn
+ 
+  DashboardEnvVars:
+    Description: Copy these into your Flask dashboard .env
+    Value: !Sub |
+      DYNAMODB_TABLE_NAME=${AlertsTable}
+      AWS_REGION=${AWS::Region}
+      
+
+
+

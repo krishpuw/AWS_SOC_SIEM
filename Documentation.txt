@@ -12,8 +12,15 @@ Project Idea
 SIEM-> security information event mangement 
 
 Logs come in (generate_logs.py creates realistic mock data)
+
+
 Parser runs detection rules, normalization of the data AWS Lambda can do this 
+
+
 Alert gets MITRE-tagged (T1110, T1046) which MITRE tagged technique is being used for this attack 
+
+
+
 Threat intel enriches  Enrichment , to tell what does it mean 
     Under these: it checks the ip :- meaning is it from threat intel blocklist , what country is it from , which interent service provider (ASN) owns it 
     user:- is it user account or real person , do they normally log in this time or are they privlegded users 
@@ -91,3 +98,65 @@ MITRE ATTACK mapping -> tags on every alert
 
 
 SIEM does :- collect -> normalize -> enrich -> correlate -> alert -> investigate 
+
+AWS SAM 
+
+sam -> serverless application model
+you have to create a yaml file which describes 
+5 AWS resources created automatically: instead of manually deplyign stuff 
+
+LogsBucket — S3 bucket, public access blocked, lifecycle moves logs to Glacier after 90 days
+AlertsTable — DynamoDB on-demand (no capacity planning), GSI on severity+timestamp so your dashboard can filter by HIGH/CRITICAL fast, TTL auto-deletes old alerts after 90 days
+ParserDetectorFunction — triggered automatically on every .json upload to S3
+ThreatIntelFunction — runs every 15 minutes on a schedule, enriches all new alerts
+ParserDetectorInvokePermission — explicit IAM permission so S3 can invoke Lambda (prevents confused deputy attack — good thing to mention in interviews)
+
+
+The header in the YAML file 
+    transform is the tell aws cloud formation this si a yaml file SAM template this needs to be there to recognize 
+
+Parameters:
+    during deploy time they call api keys and aws asks once and get deployed within its servers it remmebers it NoEcho: true 
+
+
+Globals; 
+    default keys basically what lamdba rns like python, memory size , timeout run time 
+    note: this will be both the lamdas 
+                parser and threat intel 
+
+Resources:
+    defines the aws services using 
+
+    S3 bucket:- its storage easy storeag bucket of aws , !Sub is used for SAM for string interpolation 
+                lifecylce configuration :-  important for cost control , after 30 days logs go to standard ( infrequent access) IA and after 90 days to glacier ( long term storing very cheap but retirval takes time ) ,but for me i needd logs easily and quickly accessbile cached 
+
+    Dynammodb:- alers table , billing mode is defined as pay per reqiuest on demand access and db schemma is defined 
+        also HASh -means partition key (unique identifier in distributed database ) it uses hashing , key is identifed by its alert_id 
+    
+    also GSI -> jused to query db hashed index on the threat with high severity to showcases on the dashboard 
+
+    Lambda ->
+        1. this lamdba 1 is used for parser + threat detection which is trigged by s3 , all the logd are sent here and rules are ran all the detection rule 
+                events: defines the triggers from TYPE: s3 with event of s3 object created * whe a file is uploaded to logs bucket trigger the lamda 
+                Policies: S3ReadPolicy — SAM creates an IAM role for this Lambda automatically. The S3ReadPolicy gives it read access to the logs bucket.
+                aand write acess to dynamodbwriteacess: alerts table to write least privileve the IAM gives it 
+
+        2. this lamnda 2 is for enrichemnt logs -> ip , virus threat intel from vt and abuse and unerncihes data and writes it to the alerts table tb , both read + write 
+            runs this lamabda Type::Schedule 15 mins  so scans my db and lambda handler 
+            also gives IAM access to db Dbnodbcrucialpolicy: ives it read+ write acess 
+
+    
+        3. This lambda 3 is when s3 invoks my lambda 1 it needs permission and SAM earlier made the rigger but s3 needs to be added in the IAM user role to allow it 
+            source account: only acess this on my aws account  and this helps in confuse deputy problem if another s3 bucket can invoke my lmabda guessing the amazon resource name (ARN)
+                
+
+Output: after sam deploy is ran OUTPUT (values prininted in cli) useful for testing and gwrtting to know the bucket name ( LATER CAN remove it)
+
+
+Dpelyoing SAM :- sam build , it unfolds mt lamanda zip file s, python dependicnes and SAM converets this yaml file into cloudFomration template    
+    cloudforation :- makes a change set of whats going to create/modify 
+
+
+BASICALLY -> SERVERLESS SIEM pipeline 
+
+
