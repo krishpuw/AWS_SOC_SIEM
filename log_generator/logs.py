@@ -33,6 +33,13 @@ WEB_PATHS = [
     "/api/users", "/api/admin", "/.env", "/.git",
     "/phpmyadmin", "/shell.php", "/cmd.php"
 ]
+# Extra distinct paths used only for port/service scan bursts —
+# a scan needs 10+ DISTINCT paths, so we need enough unique options
+SCAN_PATHS = WEB_PATHS + [
+    "/api/v1/users", "/api/v1/orders", "/api/v2/users", "/backup",
+    "/config", "/console", "/debug", "/graphql", "/health", "/metrics",
+    "/robots.txt", "/server-status", "/swagger", "/xmlrpc.php",
+]
 WEB_METHODS    = ["GET", "POST", "PUT", "DELETE"]
 WEB_STATUS     = [200, 200, 200, 301, 302, 400, 401, 403, 404, 500]
 USER_AGENTS    = [
@@ -68,23 +75,66 @@ def random_timestamp(hours_back=24):
     delta = timedelta(seconds=random.randint(0, hours_back * 3600))
     return (now - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+
+def random_base_time(hours_back=24):
+    now = datetime.now(timezone.utc)
+    delta = timedelta(seconds=random.randint(0, hours_back * 3600))
+    return now - delta
+
+
+def generate_burst_timestamps(base_time, count, max_gap_seconds=8):
+    timestamps = [base_time]
+    current = base_time
+    for _ in range(count - 1):
+        current = current + timedelta(seconds=random.randint(1, max_gap_seconds))
+        timestamps.append(current)
+    return [t.strftime("%Y-%m-%dT%H:%M:%SZ") for t in timestamps]
+
+
 #ssh
 def generate_ssh_logs(n=100):
     logs = []
-    for _ in range(n):
-        ip       = random.choice(ALL_IPS)
-        user     = random.choice(USERNAMES)
-        ts       = random_timestamp()
+
+    # brute force 
+    num_bursts = 4
+    burst_size = 8
+    burst_ips = random.sample(MALICIOUS_IPS, min(num_bursts, len(MALICIOUS_IPS)))
+
+    for ip in burst_ips:
+        base_time = random_base_time()
+        burst_ts = generate_burst_timestamps(base_time, burst_size, max_gap_seconds=8)
+        user = random.choice(USERNAMES)
+
+        for ts in burst_ts:
+            event_type = "ssh_brute_force"
+            attack = get_attack_tag(event_type)
+            log = {
+                "log_type":   "ssh",
+                "timestamp":  ts,
+                "source_ip":  ip,
+                "username":   user,
+                "status":     "failed",
+                "event_type": event_type,
+                "is_malicious_ip": True,
+                "mitre_attack": attack,
+                "raw": f"{ts} sshd[{random.randint(1000,9999)}]: "
+                       f"Failed password for {user} from {ip} port {random.randint(1024, 65535)} ssh2"
+            }
+            logs.append(log)
+
+    #add to normal trafffic 
+    remaining = max(0, n - len(logs))
+    for _ in range(remaining):
+        ip   = random.choice(ALL_IPS)
+        user = random.choice(USERNAMES)
+        ts   = random_timestamp()
         is_malicious = ip in MALICIOUS_IPS
 
-        # Simulate brute force: malicious IPs fail more
-        if is_malicious:
-            success = random.random() < 0.05
-        else:
-            success = random.random() < 0.85
-
+        #Occasional single failed login mixed in — realistic noise,
+        # but won't trigger brute force since it's not clustered
+        success = random.random() < (0.4 if is_malicious else 0.9)
         event_type = "ssh_success" if success else "ssh_brute_force"
-        attack     = get_attack_tag(event_type)
+        attack = get_attack_tag(event_type)
 
         log = {
             "log_type":   "ssh",
@@ -100,6 +150,7 @@ def generate_ssh_logs(n=100):
                    f"from {ip} port {random.randint(1024, 65535)} ssh2"
         }
         logs.append(log)
+
     return logs
 
 #windows events 
@@ -107,7 +158,40 @@ def generate_windows_logs(n=100):
     logs = []
     event_ids = list(WIN_EVENT_IDS.keys())
 
-    for _ in range(n):
+    #burst brute force 
+    num_bursts = 4
+    burst_size = 6
+    burst_ips = random.sample(MALICIOUS_IPS, min(num_bursts, len(MALICIOUS_IPS)))
+
+    for ip in burst_ips:
+        base_time = random_base_time()
+        burst_ts = generate_burst_timestamps(base_time, burst_size, max_gap_seconds=8)
+        user = random.choice(USERNAMES)
+
+        for ts in burst_ts:
+            event_id = 4625
+            desc = WIN_EVENT_IDS[event_id]
+            event_type = "win_failed_logon"
+            attack = get_attack_tag(event_type)
+
+            log = {
+                "log_type":        "windows_event",
+                "timestamp":       ts,
+                "event_id":        event_id,
+                "event_description": desc,
+                "source_ip":       ip,
+                "username":        user,
+                "event_type":      event_type,
+                "is_malicious_ip": True,
+                "mitre_attack":    attack,
+                "raw": f"EventID={event_id} | TimeCreated={ts} | "
+                       f"SubjectUserName={user} | IpAddress={ip} | Description={desc}"
+            }
+            logs.append(log)
+
+    #add to normal traffic 
+    remaining = max(0, n - len(logs))
+    for _ in range(remaining):
         ip       = random.choice(ALL_IPS)
         user     = random.choice(USERNAMES)
         ts       = random_timestamp()
@@ -115,7 +199,6 @@ def generate_windows_logs(n=100):
         desc     = WIN_EVENT_IDS[event_id]
         is_malicious = ip in MALICIOUS_IPS
 
-        # Map event to type
         if event_id == 4625:
             event_type = "win_failed_logon"
         elif event_id == 4624:
@@ -143,6 +226,7 @@ def generate_windows_logs(n=100):
                    f"SubjectUserName={user} | IpAddress={ip} | Description={desc}"
         }
         logs.append(log)
+
     return logs
 
 
@@ -160,7 +244,49 @@ def classify_web_event(path, user_agent):
 
 def generate_web_logs(n=100):
     logs = []
-    for _ in range(n):
+
+    #brute force attempts withgin short time like 10+ attempts
+    num_bursts = 4
+    burst_size = 12  # >10
+    burst_ips = random.sample(MALICIOUS_IPS, min(num_bursts, len(MALICIOUS_IPS)))
+
+    for ip in burst_ips:
+        base_time = random_base_time()
+        burst_ts = generate_burst_timestamps(base_time, burst_size, max_gap_seconds=5)
+        # sample distinct paths without repeats so the scan is realistic
+        scan_paths = random.sample(SCAN_PATHS, min(burst_size, len(SCAN_PATHS)))
+        user_agent = random.choice(["masscan/1.3", "Nikto/2.1.6", "sqlmap/1.4"])
+
+        for ts, path in zip(burst_ts, scan_paths):
+            method = "GET"
+            status = random.choice([404, 404, 403, 200])
+            bytes_sent = random.randint(200, 2000)
+            event_type = classify_web_event(path, user_agent)
+            if event_type == "web_normal":
+                event_type = "web_scanner"  #scaned traffic 
+            attack = get_attack_tag(event_type)
+
+            log = {
+                "log_type":        "web",
+                "timestamp":       ts,
+                "source_ip":       ip,
+                "method":          method,
+                "path":            path,
+                "status_code":     status,
+                "bytes_sent":      bytes_sent,
+                "user_agent":      user_agent,
+                "event_type":      event_type,
+                "is_malicious_ip": True,
+                "mitre_attack":    attack,
+                "raw": f'{ip} - - [{ts}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "{user_agent}"'
+            }
+            logs.append(log)
+
+    ''' scattered normal + occasional single
+       SQLi / traversal / XSS hits (these don't need clustering — a single 
+        hit is enough to trigger those rules) '''
+    remaining = max(0, n - len(logs))
+    for _ in range(remaining):
         ip         = random.choice(ALL_IPS)
         method     = random.choice(WEB_METHODS)
         path       = random.choice(WEB_PATHS)
@@ -187,6 +313,7 @@ def generate_web_logs(n=100):
             "raw": f'{ip} - - [{ts}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "{user_agent}"'
         }
         logs.append(log)
+
     return logs
 
 
@@ -213,9 +340,9 @@ def main():
 
     # Summary
     print(f"Generated {len(all_logs)} total log entries")
-    print(f"   • SSH logs:     {len(ssh_logs)}")
-    print(f"   • Windows logs: {len(win_logs)}")
-    print(f"   • Web logs:     {len(web_logs)}")
+    print(f"   - SSH logs:     {len(ssh_logs)}")
+    print(f"   - Windows logs: {len(win_logs)}")
+    print(f"   - Web logs:     {len(web_logs)}")
 
     malicious = [l for l in all_logs if l.get("is_malicious_ip")]
     print(f"Logs from known malicious IPs: {len(malicious)}")
@@ -226,16 +353,16 @@ def main():
         t = l["mitre_attack"]["technique_id"]
         techniques[t] = techniques.get(t, 0) + 1
 
-    print(f"\ MITRE ATT&CK Techniques Detected:")
+    print(f"\\ MITRE ATT&CK Techniques Detected:")
     for tid, count in sorted(techniques.items()):
         name = next(l["mitre_attack"]["technique"] for l in mitre_hits if l["mitre_attack"]["technique_id"] == tid)
-        print(f"   • {tid} — {name}: {count} events")
+        print(f"   - {tid} -- {name}: {count} events")
 
     print(f" Output files written to ./{OUTPUT_DIR}/")
-    print(f"   • security_logs.json (all combined)")
-    print(f"   • ssh_logs.json")
-    print(f"   • windows_logs.json")
-    print(f"   • web_logs.json")
+    print(f"   - security_logs.json (all combined)")
+    print(f"   - ssh_logs.json")
+    print(f"   - windows_logs.json")
+    print(f"   - web_logs.json")
 
 if __name__ == "__main__":
     main()
