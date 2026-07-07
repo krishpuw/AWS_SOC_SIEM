@@ -157,6 +157,5 @@ Dpelyoing SAM :- sam build , it unfolds mt lamanda zip file s, python dependicne
     cloudforation :- makes a change set of whats going to create/modify 
 
 
-BASICALLY -> SERVERLESS SIEM pipeline 
-
-
+#For testing locally can start dynammodb using docker 
+        docker run -d -p 8000:8000 --name dynamodb-local amazon/dynamodb-local
