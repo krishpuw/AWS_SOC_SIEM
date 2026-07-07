@@ -44,7 +44,7 @@ Resources:
   LogsBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "cloud-siem-logs-${dev}-${AWS::072456928630}"
+      BucketName: !Sub "cloud-siem-logs-${Environment}-${AWS::AccountId}"
       LifecycleConfiguration:
         Rules:
           - Id: ArchiveOldLogs
@@ -63,7 +63,7 @@ Resources:
           Value: !Ref Environment
 
   # alerts table in dynamodb
-   AlertsTable:
+  AlertsTable:
     Type: AWS::DynamoDB::Table
     Properties:
       TableName: !Sub "security-alerts-${Environment}"
@@ -91,7 +91,7 @@ Resources:
             ProjectionType: ALL
         
       # auto deleting resolved alerts past 90  days 
-       TimeToLiveSpecification:
+      TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
       Tags:
@@ -102,17 +102,16 @@ Resources:
     
 
   
-# aws lamabda -> for parser and threat detection , triggered by s3 
-
-ParserDetectorFunction:
-  Type: AWS::Serverless::Function
-  Properties:
+  # aws lamabda -> for parser and threat detection , triggered by s3 
+  ParserDetectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
       FunctionName: !Sub "siem-parser-detector-${Environment}"
       CodeUri: lambda/parser-detector/
       Handler: handler.lambda_handler
       Description: >
-       runs dectection rules from s3 and tags alerts to db 
-  # IAM role ( user is created for this )
+        runs dectection rules from s3 and tags alerts to db 
+      # IAM role ( user is created for this )
       Policies:
         - S3ReadPolicy:
             BucketName: !Ref LogsBucket
@@ -138,22 +137,20 @@ ParserDetectorFunction:
         Environment: !Ref Environment
 
 
-# lambda 2 for threat intel enrichment 
-
- ThreatIntelFunction:
+  # lambda 2 for threat intel enrichment 
+  ThreatIntelFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "siem-threat-intel-${Environment}"
       CodeUri: lambda/threat-intel/
       Handler: handler.lambda_handler
-       Description: >
+      Description: >
         scans db for unenriched alers ,  quesis is based on updates from  vt and abuse and write enriches to alerts tablle 
       Timeout: 300 
       # iam role read db and write 
-       Policies:
+      Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref AlertsTable
-
       Events:
         EnrichmentSchedule:
           Type: Schedule
@@ -172,16 +169,15 @@ ParserDetectorFunction:
         Environment: !Ref Environment
   
 
-# gives the IAm permissiont o s3 on triggered from labda 1 s3 needs to be a IAM user 
- ParserDetectorInvokePermission:
+  # gives the IAm permissiont o s3 on triggered from labda 1 s3 needs to be a IAM user 
+  ParserDetectorInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !GetAtt ParserDetectorFunction.Arn
       Action: lambda:InvokeFunction
       Principal: s3.amazonaws.com
       SourceArn: !GetAtt LogsBucket.Arn
-      
-      SourceAccount: !Ref AWS::072456928630
+      SourceAccount: !Ref AWS::AccountId
 
 
 
@@ -216,7 +212,3 @@ Outputs:
     Value: !Sub |
       DYNAMODB_TABLE_NAME=${AlertsTable}
       AWS_REGION=${AWS::Region}
-      
-
-
-
