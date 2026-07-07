@@ -1,16 +1,12 @@
 import json
 import os
+import re
+import uuid
 import boto3
-import urllib.request
-import urllib.error
-from datetime import datetime, timezone
-from decimal import Decimal
-from boto3.dynamodb.conditions import Attr
-import sys
-import glob 
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 
-
-# Local .env loader — only active when running directly
+# Local .env loader — only active when running directly 
 if __name__ == "__main__" or os.environ.get("LOCAL_MODE") == "true":
     env_path = os.path.join(os.path.dirname(__file__), ".env")
     if os.path.exists(env_path):
@@ -21,16 +17,44 @@ if __name__ == "__main__" or os.environ.get("LOCAL_MODE") == "true":
                     key, _, val = line.partition("=")
                     os.environ.setdefault(key.strip(), val.strip())
 
-                    
-
-# env vars (set in SAM template or .env for local)
-
+# env vars 
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "security-alerts")
 LOCAL_MODE          = os.environ.get("LOCAL_MODE", "false").lower() == "true"
+LOG_BUCKET          = os.environ.get("LOG_BUCKET", "")
 
 DYNAMODB_ENDPOINT   = "http://localhost:8000" if LOCAL_MODE else None
 
-# DynamoDB client 
+# detection rules 
+SSH_BRUTE_FORCE_THRESHOLD   = 5     # failed logins
+SSH_BRUTE_FORCE_WINDOW_SEC  = 60
+
+PORT_SCAN_DISTINCT_PATHS    = 10    # distinct paths hit
+PORT_SCAN_WINDOW_SEC        = 60
+
+WIN_FAILED_LOGON_THRESHOLD  = 5
+WIN_FAILED_LOGON_WINDOW_SEC = 60
+
+SQLI_PATTERNS = [
+    r"(\%27)|(\')|(\-\-)|(\%23)|(#)",
+    r"union.*select",
+    r"select.*from",
+    r"drop\s+table",
+    r"or\s+1\s*=\s*1",
+    r"' or '",
+    r"exec(\s|\+)+(s|x)p\w+",
+]
+
+TRAVERSAL_PATTERNS = [
+    r"\.\./",
+    r"\.\.%2f",
+    r"\.\.\\",
+    r"%2e%2e%2f",
+    r"etc/passwd",
+    r"boot\.ini",
+]
+
+
+#dynamodb
 def get_dynamodb():
     if LOCAL_MODE:
         return boto3.resource(
@@ -40,324 +64,289 @@ def get_dynamodb():
             aws_access_key_id="dummy",
             aws_secret_access_key="dummy",
         )
-    return boto3.resource("dynamodb",region_name=os.environ.get("AWS_REGION","us-east-1"))
+    return boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
 
 
-#   VirusTotal 
-def query_virustotal(ip: str) -> dict:
-    """
-    Query VirusTotal IP report endpoint.
-    Returns a dict with keys: malicious, suspicious, harmless, undetected,
-    total_vendors, vt_link, error.
-    """
-    if not VIRUSTOTAL_API_KEY:
-        return {"error": "VT_API_KEY_MISSING"}
 
-    url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}"
-    req = urllib.request.Request(
-        url,
-        headers={"x-apikey": VIRUSTOTAL_API_KEY, "Accept": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-
-        stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
-        return {
-            "malicious":   stats.get("malicious", 0),
-            "suspicious":  stats.get("suspicious", 0),
-            "harmless":    stats.get("harmless", 0),
-            "undetected":  stats.get("undetected", 0),
-            "total_vendors": sum(stats.values()),
-            "vt_link":     f"https://www.virustotal.com/gui/ip-address/{ip}",
-            "error":       None,
-        }
-    except urllib.error.HTTPError as e:
-        return {"error": f"VT_HTTP_{e.code}"}
-    except Exception as e:
-        return {"error": f"VT_ERROR: {str(e)}"}
+def parse_timestamp(ts: str) -> datetime:
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-#   AbuseIPDB 
-def query_abuseipdb(ip: str) -> dict:
-    """
-    Query AbuseIPDB check endpoint.
-    Returns a dict with keys: abuse_confidence_score, usage_type, country_code,
-    total_reports, last_reported_at, is_tor, error.
-    """
-    if not ABUSEIPDB_API_KEY:
-        return {"error": "ABUSE_API_KEY_MISSING"}
-
-    url = f"https://api.abuseipdb.com/api/v2/check?ipAddress={ip}&maxAgeInDays=90&verbose"
-    req = urllib.request.Request(
-        url,
-        headers={"Key": ABUSEIPDB_API_KEY, "Accept": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-
-        d = data.get("data", {})
-        return {
-            "abuse_confidence_score": d.get("abuseConfidenceScore", 0),
-            "usage_type":             d.get("usageType", "unknown"),
-            "country_code":           d.get("countryCode", "unknown"),
-            "total_reports":          d.get("totalReports", 0),
-            "last_reported_at":       d.get("lastReportedAt", None),
-            "is_tor":                 d.get("isTor", False),
-            "error":                  None,
-        }
-    except urllib.error.HTTPError as e:
-        return {"error": f"ABUSE_HTTP_{e.code}"}
-    except Exception as e:
-        return {"error": f"ABUSE_ERROR: {str(e)}"}
-
-
-# Severity upgrade logic 
-def calculate_enriched_severity(original_severity: str, vt: dict, abuse: dict) -> str:
-    """
-    Upgrade severity based on threat intel findings.
-    """
-    severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
-    current_rank  = severity_rank.get(original_severity.upper(), 1)
-    new_rank      = current_rank
-
-    abuse_score = abuse.get("abuse_confidence_score", 0)
-    vt_malicious = vt.get("malicious", 0)
-    is_tor       = abuse.get("is_tor", False)
-
-    if abuse_score >= 80 or vt_malicious >= 5:
-        new_rank = max(new_rank, 3)   # HIGH
-    if abuse_score >= 50 or is_tor:
-        new_rank = max(new_rank, 2)   # MEDIUM
-
-    rank_to_severity = {v: k for k, v in severity_rank.items()}
-    return rank_to_severity.get(new_rank, original_severity)
-
-
-# DynamoDB helpers 
-def fetch_unenriched_alerts(table) -> list:
-    """Scan for alerts that haven't been enriched yet."""
-    resp = table.scan(FilterExpression=Attr("enriched").not_exists())
-    return resp.get("Items", [])
-
-
-def update_alert_with_enrichment(table, alert_id: str, enrichment: dict):
-    """Write enrichment data back to the alert record."""
-    # Convert floats → Decimal for DynamoDB
-    def to_decimal(obj):
-        if isinstance(obj, float):
-            return Decimal(str(obj))
-        if isinstance(obj, dict):
-            return {k: to_decimal(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [to_decimal(i) for i in obj]
-        return obj
-
-    safe_enrichment = to_decimal(enrichment)
-
-    table.update_item(
-        Key={"alert_id": alert_id},
-        UpdateExpression=(
-            "SET threat_intel = :ti, "
-            "    enriched = :en, "
-            "    enriched_at = :ea, "
-            "    severity = :sv"
-        ),
-        ExpressionAttributeValues={
-            ":ti": safe_enrichment["threat_intel"],
-            ":en": True,
-            ":ea": enrichment["enriched_at"],
-            ":sv": enrichment["upgraded_severity"],
-        },
-    )
-
-
-# Core enrichment logic 
-def enrich_alert(alert: dict) -> dict:
-    # runs vt + abuse enrichment aand sets the alert 
-    source_ip        = alert.get("source_ip", "")
-    original_severity = alert.get("severity", "LOW")
-
-    print(f"[+] Enriching alert {alert.get('alert_id')} | IP: {source_ip}")
-
-    vt    = query_virustotal(source_ip)
-    abuse = query_abuseipdb(source_ip)
-
-    upgraded_severity = calculate_enriched_severity(original_severity, vt, abuse)
-
-    # Determine overall verdict
-    abuse_score  = abuse.get("abuse_confidence_score", 0)
-    vt_malicious = vt.get("malicious", 0)
-
-    if abuse_score >= 80 or vt_malicious >= 10:
-        verdict = "MALICIOUS"
-    elif abuse_score >= 50 or vt_malicious >= 3:
-        verdict = "SUSPICIOUS"
-    else:
-        verdict = "CLEAN"
-
+def make_alert(rule_name, tactic, technique_id, technique_name, severity,
+               source_ip, description, evidence, log_type):
+    now = datetime.now(timezone.utc)
+    ttl = int((now + timedelta(days=90)).timestamp())
     return {
-        "threat_intel": {
-            "source_ip": source_ip,
-            "verdict":   verdict,
-            "virustotal": {
-                "malicious":      vt.get("malicious", 0),
-                "suspicious":     vt.get("suspicious", 0),
-                "harmless":       vt.get("harmless", 0),
-                "total_vendors":  vt.get("total_vendors", 0),
-                "vt_link":        vt.get("vt_link", ""),
-                "error":          vt.get("error"),
-            },
-            "abuseipdb": {
-                "confidence_score": abuse.get("abuse_confidence_score", 0),
-                "usage_type":       abuse.get("usage_type", "unknown"),
-                "country_code":     abuse.get("country_code", "unknown"),
-                "total_reports":    abuse.get("total_reports", 0),
-                "last_reported_at": abuse.get("last_reported_at"),
-                "is_tor":           abuse.get("is_tor", False),
-                "error":            abuse.get("error"),
-            },
+        "alert_id":     str(uuid.uuid4()),
+        "timestamp":    now.isoformat(),
+        "rule_name":    rule_name,
+        "log_type":     log_type,
+        "source_ip":    source_ip,
+        "severity":     severity,
+        "description":  description,
+        "evidence":     evidence,
+        "mitre_attack": {
+            "tactic":         tactic,
+            "technique_id":   technique_id,
+            "technique_name": technique_name,
         },
-        "upgraded_severity": upgraded_severity,
-        "severity_upgraded": upgraded_severity != original_severity,
-        "enriched_at": datetime.now(timezone.utc).isoformat(),
+        "enriched": False,
+        "ttl": ttl,
     }
 
 
-#Lambda handler 
+#ssh bf
+def detect_ssh_brute_force(logs):
+    """5+ failed SSH logins from the same IP within 60 seconds."""
+    alerts = []
+    ssh_logs = [l for l in logs if l.get("log_type") == "ssh" and l.get("status") == "failed"]
+
+    by_ip = defaultdict(list)
+    for log in ssh_logs:
+        by_ip[log["source_ip"]].append(log)
+
+    for ip, entries in by_ip.items():
+        entries.sort(key=lambda l: l["timestamp"])
+        for i in range(len(entries)):
+            window_start = parse_timestamp(entries[i]["timestamp"])
+            window = [
+                e for e in entries[i:]
+                if (parse_timestamp(e["timestamp"]) - window_start).total_seconds() <= SSH_BRUTE_FORCE_WINDOW_SEC
+            ]
+            if len(window) >= SSH_BRUTE_FORCE_THRESHOLD:
+                alerts.append(make_alert(
+                    rule_name="ssh_brute_force",
+                    tactic="Credential Access",
+                    technique_id="T1110.001",
+                    technique_name="Brute Force: Password Guessing",
+                    severity="HIGH",
+                    source_ip=ip,
+                    description=f"{len(window)} failed SSH logins from {ip} within {SSH_BRUTE_FORCE_WINDOW_SEC}s",
+                    evidence=[e["raw"] for e in window[:10]],
+                    log_type="ssh",
+                ))
+                break  # one alert per IP is enough
+    return alerts
+
+
+# proxy ip hits and scans port
+def detect_port_scan(logs):
+    alerts = []
+    web_logs = [l for l in logs if l.get("log_type") == "web"]
+
+    by_ip = defaultdict(list)
+    for log in web_logs:
+        by_ip[log["source_ip"]].append(log)
+
+    for ip, entries in by_ip.items():
+        entries.sort(key=lambda l: l["timestamp"])
+        for i in range(len(entries)):
+            window_start = parse_timestamp(entries[i]["timestamp"])
+            window = [
+                e for e in entries[i:]
+                if (parse_timestamp(e["timestamp"]) - window_start).total_seconds() <= PORT_SCAN_WINDOW_SEC
+            ]
+            distinct_paths = set(e["path"] for e in window)
+            if len(distinct_paths) >= PORT_SCAN_DISTINCT_PATHS:
+                alerts.append(make_alert(
+                    rule_name="port_scan",
+                    tactic="Reconnaissance",
+                    technique_id="T1046",
+                    technique_name="Network Service Discovery",
+                    severity="MEDIUM",
+                    source_ip=ip,
+                    description=f"{ip} probed {len(distinct_paths)} distinct paths within {PORT_SCAN_WINDOW_SEC}s",
+                    evidence=[e["raw"] for e in window[:10]],
+                    log_type="web",
+                ))
+                break
+    return alerts
+
+
+# failed window logins
+def detect_windows_failed_logins(logs):
+    """5+ failed Windows logon events (4625) from same IP within 60 seconds."""
+    alerts = []
+    win_logs = [
+        l for l in logs
+        if l.get("log_type") == "windows_event" and l.get("event_id") == 4625
+    ]
+
+    by_ip = defaultdict(list)
+    for log in win_logs:
+        by_ip[log["source_ip"]].append(log)
+
+    for ip, entries in by_ip.items():
+        entries.sort(key=lambda l: l["timestamp"])
+        for i in range(len(entries)):
+            window_start = parse_timestamp(entries[i]["timestamp"])
+            window = [
+                e for e in entries[i:]
+                if (parse_timestamp(e["timestamp"]) - window_start).total_seconds() <= WIN_FAILED_LOGON_WINDOW_SEC
+            ]
+            if len(window) >= WIN_FAILED_LOGON_THRESHOLD:
+                alerts.append(make_alert(
+                    rule_name="windows_failed_logon_burst",
+                    tactic="Credential Access",
+                    technique_id="T1110",
+                    technique_name="Brute Force",
+                    severity="HIGH",
+                    source_ip=ip,
+                    description=f"{len(window)} failed Windows logons (4625) from {ip} within {WIN_FAILED_LOGON_WINDOW_SEC}s",
+                    evidence=[e["raw"] for e in window[:10]],
+                    log_type="windows_event",
+                ))
+                break
+    return alerts
+
+
+# sql injectiona ttack
+def detect_sql_injection(logs):
+    """Web request path matches known SQLi patterns."""
+    alerts = []
+    web_logs = [l for l in logs if l.get("log_type") == "web"]
+
+    for log in web_logs:
+        path = log.get("path", "").lower()
+        for pattern in SQLI_PATTERNS:
+            if re.search(pattern, path, re.IGNORECASE):
+                alerts.append(make_alert(
+                    rule_name="sql_injection_attempt",
+                    tactic="Initial Access",
+                    technique_id="T1190",
+                    technique_name="Exploit Public-Facing Application",
+                    severity="HIGH",
+                    source_ip=log["source_ip"],
+                    description=f"SQL injection pattern detected in request path from {log['source_ip']}",
+                    evidence=[log["raw"]],
+                    log_type="web",
+                ))
+                break  # one match is enough for this log entry
+    return alerts
+
+
+# directory traversal
+def detect_directory_traversal(logs):
+    """Web request path matches directory traversal patterns."""
+    alerts = []
+    web_logs = [l for l in logs if l.get("log_type") == "web"]
+
+    for log in web_logs:
+        path = log.get("path", "").lower()
+        for pattern in TRAVERSAL_PATTERNS:
+            if re.search(pattern, path, re.IGNORECASE):
+                alerts.append(make_alert(
+                    rule_name="directory_traversal",
+                    tactic="Discovery",
+                    technique_id="T1083",
+                    technique_name="File and Directory Discovery",
+                    severity="MEDIUM",
+                    source_ip=log["source_ip"],
+                    description=f"Directory traversal pattern detected in request path from {log['source_ip']}",
+                    evidence=[log["raw"]],
+                    log_type="web",
+                ))
+                break
+    return alerts
+
+
+
+def run_detection_rules(logs):
+    all_alerts = []
+    all_alerts.extend(detect_ssh_brute_force(logs))
+    all_alerts.extend(detect_port_scan(logs))
+    all_alerts.extend(detect_windows_failed_logins(logs))
+    all_alerts.extend(detect_sql_injection(logs))
+    all_alerts.extend(detect_directory_traversal(logs))
+    return all_alerts
+
+
+#alerts to db
+def write_alerts(table, alerts):
+    written = 0
+    for alert in alerts:
+        try:
+            table.put_item(Item=alert)
+            written += 1
+        except Exception as e:
+            print(f"[!] Failed to write alert {alert.get('alert_id')}: {e}")
+    return written
+
+
+#
 def lambda_handler(event, context):
-    
-    #enriches all unenriched alerts in DynamoDB
-    #Direct invocation with alert_id / enriches one specific alert
-    
+    """
+    Triggered by S3 ObjectCreated event. Reads the uploaded log file,
+    runs detection rules, writes alerts to DynamoDB.
+    """
     dynamodb = get_dynamodb()
     table    = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
-    results = {"enriched": [], "skipped": [], "errors": []}
+    s3 = boto3.client("s3")
 
-    # single alert 
-    if "alert_id" in event:
-        alert_id = event["alert_id"]
-        resp  = table.get_item(Key={"alert_id": alert_id})
-        alert = resp.get("Item")
-        if not alert:
-            return {"statusCode": 404, "body": f"Alert {alert_id} not found"}
+    total_alerts = 0
 
-        try:
-            enrichment = enrich_alert(alert)
-            update_alert_with_enrichment(table, alert_id, enrichment)
-            results["enriched"].append(alert_id)
-        except Exception as e:
-            results["errors"].append({"alert_id": alert_id, "error": str(e)})
+    for record in event.get("Records", []):
+        bucket = record["s3"]["bucket"]["name"]
+        key    = record["s3"]["object"]["key"]
 
-    # unenriched alerts 
-    else:
-        alerts = fetch_unenriched_alerts(table)
-        print(f"[*] Found {len(alerts)} unenriched alerts")
+        print(f"[+] Processing s3://{bucket}/{key}")
 
-        for alert in alerts:
-            alert_id  = alert.get("alert_id")
-            source_ip = alert.get("source_ip", "")
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        logs = json.loads(obj["Body"].read())
 
-            # Skip private/internal IPs — no point querying threat intel
-            if not source_ip or source_ip.startswith(("10.", "192.168.", "172.")):
-                print(f"[~] Skipping private IP alert {alert_id}")
-                results["skipped"].append(alert_id)
-                continue
+        if isinstance(logs, dict):
+            logs = [logs]
 
-            try:
-                enrichment = enrich_alert(alert)
-                update_alert_with_enrichment(table, alert_id, enrichment)
-                results["enriched"].append(alert_id)
-                print(f"[✓] Enriched {alert_id} → verdict: {enrichment['threat_intel']['verdict']} | severity: {enrichment['upgraded_severity']}")
-            except Exception as e:
-                print(f"[✗] Failed to enrich {alert_id}: {e}")
-                results["errors"].append({"alert_id": alert_id, "error": str(e)})
+        alerts = run_detection_rules(logs)
+        written = write_alerts(table, alerts)
+        total_alerts += written
 
-    print(f"[*] Done — enriched: {len(results['enriched'])}, skipped: {len(results['skipped'])}, errors: {len(results['errors'])}")
-    return {"statusCode": 200, "body": json.dumps(results)}
+        print(f"[+] {len(alerts)} alerts generated, {written} written to DynamoDB")
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({"alerts_written": total_alerts}),
+    }
 
 
-
+#testing
 if __name__ == "__main__":
+    logs_path = os.path.join(
+        os.path.dirname(__file__), "..", "log_generator", "sample-logs", "security_logs.json"
+    )
 
-    VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "")
-    ABUSEIPDB_API_KEY  = os.environ.get("ABUSEIPDB_API_KEY", "")
-
-    # # testing virustotal and abuseipdb with a random ip address
-    # test_ip = sys.argv[1] if len(sys.argv) > 1 else "198.20.70.114"
-    # print(f"Testing IP: {test_ip}\n")
-
-    # vt    = query_virustotal(test_ip)
-    # abuse = query_abuseipdb(test_ip)
-
-    # print("VirusTotal result:")
-    # print(json.dumps(vt, indent=2))
-    # print("\nAbuseIPDB result:")
-    # print(json.dumps(abuse, indent=2))
-
-    # severity = calculate_enriched_severity("MEDIUM", vt, abuse)
-    # print(f"\nUpgraded severity: {severity}")
-
-    logs_path = os.path.join(os.path.dirname(__file__), "..", "log_generator", "sample-logs", "security_logs.json")
-
-    if os.path.exists(logs_path):
-        with open(logs_path) as f:
-            logs = json.load(f)
-
-        # Extract unique public source IPs
-        seen = set()
-        public_ips = []
-        for log in logs:
-            ip = log.get("source_ip") or log.get("src_ip") or log.get("ip", "")
-            if not ip:
-                continue
-            if ip in seen:
-                continue
-            if ip.startswith(("10.", "192.168.", "172.", "127.")):
-                continue
-            seen.add(ip)
-            public_ips.append(ip)
-
-        print(f"Enriching IPs from logs ({len(public_ips)} unique public IPs)\n")
-
-        malicious_hits = []
-
-        for ip in public_ips:
-            vt    = query_virustotal(ip)
-            abuse = query_abuseipdb(ip)
-            sev   = calculate_enriched_severity("MEDIUM", vt, abuse)
-
-            abuse_score  = abuse.get("abuse_confidence_score", 0)
-            vt_malicious = vt.get("malicious", 0)
-
-            if abuse_score >= 80 or vt_malicious >= 10:
-                verdict = "MALICIOUS"
-            elif abuse_score >= 50 or vt_malicious >= 3:
-                verdict = "SUSPICIOUS"
-            else:
-                verdict = "CLEAN"
-
-            if verdict == "MALICIOUS":
-                flag = "[MALICIOUS]"
-            elif verdict == "SUSPICIOUS":
-                flag = "[SUSPICIOUS]"
-            else:
-                flag = "[CLEAN]"
-
-            print(f"{flag:<12} {ip:<18} | VT malicious: {vt_malicious:<3} | AbuseIPDB: {abuse_score}% | severity -> {sev}")
-
-            if verdict in ("MALICIOUS", "SUSPICIOUS"):
-                malicious_hits.append({"ip": ip, "verdict": verdict, "vt_malicious": vt_malicious, "abuse_score": abuse_score})
-
-        print(f"\n[Summary] {len(malicious_hits)} flagged IPs out of {len(public_ips)} scanned")
-        for hit in malicious_hits:
-            print(f"  !! {hit['ip']} -- {hit['verdict']} (VT: {hit['vt_malicious']}, AbuseIPDB: {hit['abuse_score']}%)")
-
-    else:
-        print(f"\n[!] Logs file not found at: {logs_path}")
+    if not os.path.exists(logs_path):
+        print(f"[!] Logs file not found at: {logs_path}")
         print("    Run logs.py first, then re-run this script.")
+        raise SystemExit(1)
 
+    with open(logs_path) as f:
+        logs = json.load(f)
 
-    # test dynamodb maybe 
+    print(f"Loaded {len(logs)} log entries\n")
+
+    alerts = run_detection_rules(logs)
+    print(f"=== Detection complete: {len(alerts)} alerts generated ===\n")
+
+    by_rule = defaultdict(int)
+    for a in alerts:
+        by_rule[a["rule_name"]] += 1
+
+    for rule, count in by_rule.items():
+        print(f"  {rule:<30} {count} alert(s)")
+
+    print()
+    for a in alerts:
+        print(f"[{a['severity']:<8}] {a['rule_name']:<25} | {a['source_ip']:<18} | {a['mitre_attack']['technique_id']} - {a['mitre_attack']['technique_name']}")
+        print(f"           {a['description']}")
+
+    # Write to local DynamoDB if LOCAL_MODE is set
+    if LOCAL_MODE:
+        print("\n=== Writing alerts to local DynamoDB ===")
+        dynamodb = get_dynamodb()
+        table    = dynamodb.Table(DYNAMODB_TABLE_NAME)
+        written = write_alerts(table, alerts)
+        print(f"[+] {written}/{len(alerts)} alerts written to DynamoDB table '{DYNAMODB_TABLE_NAME}'")
+    else:
+        print("\n[i] Set LOCAL_MODE=true in .env to write these alerts to local DynamoDB")
