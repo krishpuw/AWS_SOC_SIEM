@@ -108,7 +108,7 @@ def query_abuseipdb(ip: str) -> dict:
         return {"error": f"ABUSE_ERROR: {str(e)}"}
 
 
-# Severity upgrade logic
+
 def calculate_enriched_severity(original_severity: str, vt: dict, abuse: dict) -> str:
     """Upgrade severity based on threat intel findings."""
     severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
