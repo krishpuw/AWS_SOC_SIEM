@@ -102,19 +102,20 @@ Resources:
     
 
   
+
   # aws lamabda -> for parser and threat detection , triggered by s3 
   ParserDetectorFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "siem-parser-detector-${Environment}"
-      CodeUri: lambda/parser-detector/
+      CodeUri: ../lambda/parser-detector/
       Handler: handler.lambda_handler
       Description: >
         runs dectection rules from s3 and tags alerts to db 
       # IAM role ( user is created for this )
       Policies:
         - S3ReadPolicy:
-            BucketName: !Ref LogsBucket
+            BucketName: !Sub "cloud-siem-logs-${Environment}-${AWS::AccountId}"
         - DynamoDBWritePolicy:
             TableName: !Ref AlertsTable
       # triggers event 
@@ -131,7 +132,7 @@ Resources:
                     Value: .json
       Environment:
         Variables:
-          LOG_BUCKET: !Ref LogsBucket
+          LOG_BUCKET: !Sub "cloud-siem-logs-${Environment}-${AWS::AccountId}"
       Tags:
         Project: cloud-siem
         Environment: !Ref Environment
@@ -142,7 +143,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "siem-threat-intel-${Environment}"
-      CodeUri: lambda/threat-intel/
+      CodeUri: ../lambda/threat-intel/
       Handler: handler.lambda_handler
       Description: >
         scans db for unenriched alers ,  quesis is based on updates from  vt and abuse and write enriches to alerts tablle 
@@ -169,15 +170,17 @@ Resources:
         Environment: !Ref Environment
   
 
-  # gives the IAm permissiont o s3 on triggered from labda 1 s3 needs to be a IAM user 
-  ParserDetectorInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt ParserDetectorFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: s3.amazonaws.com
-      SourceArn: !GetAtt LogsBucket.Arn
-      SourceAccount: !Ref AWS::AccountId
+# dont need this anymore causes a loop  as sam triggers it automatically 
+  # # gives the IAm permissiont o s3 on triggered from labda 1 s3 needs to be a IAM user 
+
+  # ParserDetectorInvokePermission:
+  #   Type: AWS::Lambda::Permission
+  #   Properties:
+  #     FunctionName: !GetAtt ParserDetectorFunction.Arn
+  #     Action: lambda:InvokeFunction
+  #     Principal: s3.amazonaws.com
+  #     SourceArn: !GetAtt LogsBucket.Arn
+  #     SourceAccount: !Ref AWS::AccountId
 
 
 

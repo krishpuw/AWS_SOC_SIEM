@@ -1,0 +1,7 @@
+version = 0.1
+
+[default.build.parameters]
+template_file = "infrastructure/template.yaml"
+
+[default.deploy.parameters]
+template_file = "infrastructure/template.yaml"
