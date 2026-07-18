@@ -21,8 +21,13 @@ if __name__ == "__main__" or os.environ.get("LOCAL_MODE") == "true":
 # env vars (set in SAM template or .env for local)
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "security-alerts")
 LOCAL_MODE          = os.environ.get("LOCAL_MODE", "false").lower() == "true"
+VIRUSTOTAL_API_KEY  = os.environ.get("VIRUSTOTAL_API_KEY", "")
+ABUSEIPDB_API_KEY   = os.environ.get("ABUSEIPDB_API_KEY", "")
 
 DYNAMODB_ENDPOINT   = "http://localhost:8000" if LOCAL_MODE else None
+
+
+
 
 
 # DynamoDB client
@@ -268,12 +273,14 @@ def lambda_handler(event, context):
     return {"statusCode": 200, "body": json.dumps(results)}
 
 
-# Local test
-if __name__ == "__main__":
-    VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "")
-    ABUSEIPDB_API_KEY  = os.environ.get("ABUSEIPDB_API_KEY", "")
 
-    print("=== Threat Intel -- enriching real alerts from DynamoDB ===\n")
-    result = lambda_handler({}, None)
-    print("\n=== Result ===")
-    print(json.dumps(json.loads(result["body"]), indent=2))
+
+# # Local test
+# if __name__ == "__main__":
+#     VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "")
+#     ABUSEIPDB_API_KEY  = os.environ.get("ABUSEIPDB_API_KEY", "")
+
+#     print("=== Threat Intel -- enriching real alerts from DynamoDB ===\n")
+#     result = lambda_handler({}, None)
+#     print("\n=== Result ===")
+#     print(json.dumps(json.loads(result["body"]), indent=2))
