@@ -230,15 +230,4 @@ What works is `aws s3api put-object`, which issues one unchunked PUT instead of 
 
 **SAM resolves `CodeUri` relative to the template file, not the project root.** With the template at `infrastructure/template.yaml`, paths need a `../` prefix. Without it, SAM prints "Build Succeeded" while silently copying nothing.
 
-**Do not hand-write an S3 invoke permission alongside a SAM `Events: S3` block.** SAM generates that permission itself; adding a manual `AWS::Lambda::Permission` that references the bucket ARN creates a circular dependency between the bucket, the function, and the role. Referencing the bucket with a `!Sub` static string rather than `!Ref` in environment variables and IAM policies breaks the remaining reference cycle.
 
-**Module-level code runs in Lambda; `if __name__ == "__main__"` does not.** Environment variables read inside that block work locally and are undefined in production — Lambda imports the module and calls the handler directly.
-
----
-
-## Roadmap
-
-- [ ] Flask analyst dashboard reading from the severity GSI
-- [ ] Additional rules: lateral movement (T1021), persistence via scheduled task (T1053)
-- [ ] SNS notification on `CRITICAL` verdicts
-- [ ] Deduplication so a repeat offender IP updates an existing alert rather than creating a new one
