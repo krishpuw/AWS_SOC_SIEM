@@ -280,10 +280,11 @@ def write_alerts(table, alerts):
 
 
 #alerts to splunk hec
-def forward_alerts_to_splunk(alerts, source=SPLUNK_SOURCE):
+def forward_alerts_to_splunk(alerts, source=SPLUNK_SOURCE, s3_object=None):
     """
     Sends alerts to Splunk HEC in batches. Runs after the DynamoDB write and
     never raises, so a Splunk outage can't fail the Lambda or lose DB writes.
+    s3_object (the log file the alerts came from) is sent as an indexed field.
     Returns the number of alerts accepted by HEC.
     """
     if not alerts:
@@ -301,7 +302,10 @@ def forward_alerts_to_splunk(alerts, source=SPLUNK_SOURCE):
                 event_time = datetime.fromisoformat(alert["timestamp"]).timestamp()
             except (KeyError, ValueError):
                 event_time = None
-            payloads.append(splunk_hec.build_payload(alert, time=event_time, source=source))
+            payloads.append(splunk_hec.build_payload(
+                alert, time=event_time, source=source,
+                fields={"s3_object": s3_object} if s3_object else None,
+            ))
 
         try:
             if splunk_hec.send_events(payloads):
@@ -343,7 +347,7 @@ def lambda_handler(event, context):
 
         print(f"[+] {len(alerts)} alerts generated, {written} written to DynamoDB")
 
-        sent = forward_alerts_to_splunk(alerts, source=f"s3://{bucket}/{key}")
+        sent = forward_alerts_to_splunk(alerts, s3_object=f"s3://{bucket}/{key}")
         total_sent += sent
         print(f"[+] {sent}/{len(alerts)} alerts sent to Splunk HEC")
 
@@ -356,7 +360,7 @@ def lambda_handler(event, context):
 #testing
 if __name__ == "__main__":
     logs_path = os.path.join(
-        os.path.dirname(__file__), "..", "log_generator", "sample-logs", "security_logs.json"
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "log_generator", "sample-logs", "security_logs.json"
     )
 
     if not os.path.exists(logs_path):

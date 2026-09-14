@@ -40,9 +40,14 @@ def is_configured() -> bool:
 
 
 def build_payload(event: dict, time=None, source=None, sourcetype="_json",
-                  host=None, index=None) -> dict:
-    """Wrap an event dict in the HEC envelope. Optional fields are omitted when None."""
+                  host=None, index=None, fields=None) -> dict:
+    """
+    Wrap an event dict in the HEC envelope. Optional fields are omitted when None.
+    fields: flat dict of indexed fields (searchable as name::value).
+    """
     payload = {"event": event, "sourcetype": sourcetype}
+    if fields:
+        payload["fields"] = fields
     if time is not None:
         payload["time"] = time
     if source is not None:

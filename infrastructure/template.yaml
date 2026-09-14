@@ -233,9 +233,3 @@ Outputs:
   ThreatIntelFunctionArn:
     Description: ARN of the threat intel Lambda
     Value: !GetAtt ThreatIntelFunction.Arn
- 
-  DashboardEnvVars:
-    Description: Copy these into your Flask dashboard .env
-    Value: !Sub |
-      DYNAMODB_TABLE_NAME=${AlertsTable}
-      AWS_REGION=${AWS::Region}

@@ -39,7 +39,7 @@ DynamoDB stores the enriched alert
     Threshold based:- volume if data transfer exceeds from 1gb in hr , alert 
     UEBA :- builds a baseline of normal behaviour attack analysis if a users logins from nyc at 9 am usually and randomly from russia at 3 am , can indicate a comprised account that rule based detection misses 
 
-    Projecgt there are 10 detection rules (BF brute force -: count of failures ) , port scan ( count of distinct ports), sqli ( string matching on paylod)\
+    Projecgt there are 5 detection rules (BF brute force -: count of failures ) , port scan ( count of distinct ports), sqli ( string matching on paylod)\
 
     BUT CAN ADD more maybe using a file  as data too ? 
 
@@ -93,7 +93,7 @@ SIEM parsing engine -> lambda parser
 detection rules (SPL,KQL,Sigma) -> handler.py
 threat intel platform MALWARE INFORMATION SHARING PLATFORM -> threat intel lambda + virus toal , ABUSEIPDB
 Alert db -> dynamo db 
-SOC analyst console -> flask dashboard 
+SOC analyst console -> splunk dashboards (alerts sent via HTTP Event Collector, replaced the planned flask dashboard)
 MITRE ATTACK mapping -> tags on every alert 
 
 
@@ -217,3 +217,21 @@ single request put-object
         --region us-east-1
 
     
+
+Splunk integration (HEC) 
+
+    instead of building the flask dashboard, every alert is forwarded to splunk using HTTP Event Collector (HEC)
+    splunk_hec.py -> small client using requests, reads HEC_URL + HEC_TOKEN from env vars (token never hardcoded)
+        copied into both lambda folders because SAM packages each CodeUri folder on its own
+
+    parser-detector -> sends each detected alert after the dynamodb put_item , source = cloud-siem:parser-detector , s3 file as indexed field s3_object
+    threat-intel -> sends the full alert merged with the enrichment after update_item , source = cloud-siem:threat-intel
+        same alert_id shows up twice in splunk (detected + enriched) -> use | dedup alert_id , enriched one is newer
+
+    if splunk is down it only logs the error , lambda still returns 200 and dynamodb writes are not affected
+
+    template params: HecUrl , HecToken (NoEcho) , HecVerifySsl -> env vars HEC_URL , HEC_TOKEN , HEC_VERIFY_SSL
+        param names cant have underscores (alphanumeric only) but lambda env var names can
+
+    sam local invoke runs in docker -> localhost is the container , use https://host.docker.internal:8088 for local splunk
+    deployed lambda cant reach splunk on my laptop -> need a public HEC endpoint (splunk cloud trial)
