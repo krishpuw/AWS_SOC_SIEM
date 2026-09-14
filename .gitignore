@@ -229,3 +229,7 @@ __marimo__/
 /.env/
 
 .env
+
+# sam build output and local installer
+.aws-sam/
+*.pkg

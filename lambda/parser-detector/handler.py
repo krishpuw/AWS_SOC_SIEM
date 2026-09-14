@@ -6,6 +6,8 @@ import boto3
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
+import splunk_hec
+
 # Local .env loader — only active when running directly 
 if __name__ == "__main__" or os.environ.get("LOCAL_MODE") == "true":
     env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -21,6 +23,10 @@ if __name__ == "__main__" or os.environ.get("LOCAL_MODE") == "true":
 DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "security-alerts")
 LOCAL_MODE          = os.environ.get("LOCAL_MODE", "false").lower() == "true"
 LOG_BUCKET          = os.environ.get("LOG_BUCKET", "")
+# HEC_URL / HEC_TOKEN are read by splunk_hec.py at send time
+
+SPLUNK_SOURCE       = "cloud-siem:parser-detector"
+SPLUNK_BATCH_SIZE   = 100   # alerts per HEC request
 
 DYNAMODB_ENDPOINT   = "http://localhost:8000" if LOCAL_MODE else None
 
@@ -273,6 +279,38 @@ def write_alerts(table, alerts):
     return written
 
 
+#alerts to splunk hec
+def forward_alerts_to_splunk(alerts, source=SPLUNK_SOURCE):
+    """
+    Sends alerts to Splunk HEC in batches. Runs after the DynamoDB write and
+    never raises, so a Splunk outage can't fail the Lambda or lose DB writes.
+    Returns the number of alerts accepted by HEC.
+    """
+    if not alerts:
+        return 0
+    if not splunk_hec.is_configured():
+        print("[i] HEC_URL / HEC_TOKEN not set, skipping Splunk forward")
+        return 0
+
+    sent = 0
+    for i in range(0, len(alerts), SPLUNK_BATCH_SIZE):
+        batch = alerts[i:i + SPLUNK_BATCH_SIZE]
+        payloads = []
+        for alert in batch:
+            try:
+                event_time = datetime.fromisoformat(alert["timestamp"]).timestamp()
+            except (KeyError, ValueError):
+                event_time = None
+            payloads.append(splunk_hec.build_payload(alert, time=event_time, source=source))
+
+        try:
+            if splunk_hec.send_events(payloads):
+                sent += len(batch)
+        except Exception as e:
+            print(f"[!] Unexpected error forwarding alerts to Splunk: {e}")
+    return sent
+
+
 #
 def lambda_handler(event, context):
     """
@@ -285,6 +323,7 @@ def lambda_handler(event, context):
     s3 = boto3.client("s3")
 
     total_alerts = 0
+    total_sent   = 0
 
     for record in event.get("Records", []):
         bucket = record["s3"]["bucket"]["name"]
@@ -304,9 +343,13 @@ def lambda_handler(event, context):
 
         print(f"[+] {len(alerts)} alerts generated, {written} written to DynamoDB")
 
+        sent = forward_alerts_to_splunk(alerts, source=f"s3://{bucket}/{key}")
+        total_sent += sent
+        print(f"[+] {sent}/{len(alerts)} alerts sent to Splunk HEC")
+
     return {
         "statusCode": 200,
-        "body": json.dumps({"alerts_written": total_alerts}),
+        "body": json.dumps({"alerts_written": total_alerts, "alerts_sent_to_splunk": total_sent}),
     }
 
 
@@ -350,3 +393,14 @@ if __name__ == "__main__":
         print(f"[+] {written}/{len(alerts)} alerts written to DynamoDB table '{DYNAMODB_TABLE_NAME}'")
     else:
         print("\n[i] Set LOCAL_MODE=true in .env to write these alerts to local DynamoDB")
+
+    # Send to Splunk HEC - token is prompted for, never stored in code
+    if os.environ.get("HEC_URL"):
+        if not os.environ.get("HEC_TOKEN"):
+            import getpass
+            os.environ["HEC_TOKEN"] = getpass.getpass("Splunk HEC token: ")
+        print("\n=== Sending alerts to Splunk HEC ===")
+        sent = forward_alerts_to_splunk(alerts, source="cloud-siem:local-test")
+        print(f"[+] {sent}/{len(alerts)} alerts sent to Splunk HEC at {os.environ['HEC_URL']}")
+    else:
+        print("[i] Set HEC_URL (and optionally HEC_TOKEN) to also send these alerts to Splunk")

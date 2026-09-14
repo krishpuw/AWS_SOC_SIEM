@@ -25,6 +25,24 @@ Parameters:
     Default: rate(15 minutes)
     Description: enrich new alerst every 15 mins threat intel 
 
+  # splunk hec forwarding (leave blank to disable)
+  HecUrl:
+    Type: String
+    Default: ""
+    Description: Splunk HEC base URL, e.g. https://splunk.example.com:8088
+
+  HecToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Splunk HEC token
+
+  HecVerifySsl:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set to false only for a self-signed Splunk cert
+
 
 Globals:
   Function:
@@ -133,6 +151,9 @@ Resources:
       Environment:
         Variables:
           LOG_BUCKET: !Sub "cloud-siem-logs-${Environment}-${AWS::AccountId}"
+          HEC_URL: !Ref HecUrl
+          HEC_TOKEN: !Ref HecToken
+          HEC_VERIFY_SSL: !Ref HecVerifySsl
       Tags:
         Project: cloud-siem
         Environment: !Ref Environment
@@ -165,6 +186,9 @@ Resources:
           VIRUSTOTAL_API_KEY: !Ref VirusTotalApiKey
           ABUSEIPDB_API_KEY: !Ref AbuseIpDbApiKey
           AWS_REGION_NAME: !Ref AWS::Region
+          HEC_URL: !Ref HecUrl
+          HEC_TOKEN: !Ref HecToken
+          HEC_VERIFY_SSL: !Ref HecVerifySsl
       Tags:
         Project: cloud-siem
         Environment: !Ref Environment

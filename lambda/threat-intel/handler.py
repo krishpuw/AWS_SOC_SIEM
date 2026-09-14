@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from boto3.dynamodb.conditions import Attr
 
+import splunk_hec
+
 # Local .env loader — only active when running directly
 if __name__ == "__main__" or os.environ.get("LOCAL_MODE") == "true":
     env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -23,6 +25,9 @@ DYNAMODB_TABLE_NAME = os.environ.get("DYNAMODB_TABLE_NAME", "security-alerts")
 LOCAL_MODE          = os.environ.get("LOCAL_MODE", "false").lower() == "true"
 VIRUSTOTAL_API_KEY  = os.environ.get("VIRUSTOTAL_API_KEY", "")
 ABUSEIPDB_API_KEY   = os.environ.get("ABUSEIPDB_API_KEY", "")
+# HEC_URL / HEC_TOKEN are read by splunk_hec.py at send time
+
+SPLUNK_SOURCE       = "cloud-siem:threat-intel"
 
 DYNAMODB_ENDPOINT   = "http://localhost:8000" if LOCAL_MODE else None
 
@@ -221,6 +226,38 @@ def enrich_alert(alert: dict) -> dict:
     }
 
 
+# Splunk HEC
+def build_enriched_alert(alert: dict, enrichment: dict) -> dict:
+    """Original alert with the enrichment merged in, matching the updated DynamoDB record."""
+    merged = dict(alert)
+    merged["original_severity"] = alert.get("severity")
+    merged["severity"]          = enrichment["upgraded_severity"]
+    merged["severity_upgraded"] = enrichment["severity_upgraded"]
+    merged["threat_intel"]      = enrichment["threat_intel"]
+    merged["enriched"]          = True
+    merged["enriched_at"]       = enrichment["enriched_at"]
+    return merged
+
+
+def forward_enriched_alert(alert: dict, enrichment: dict) -> bool:
+    """
+    Sends the merged alert to Splunk HEC. Runs after the DynamoDB update and
+    never raises, so a Splunk outage can't fail enrichment.
+    Event time is enriched_at, so the enriched copy is newer than the
+    detection copy sent by parser-detector (same alert_id).
+    """
+    try:
+        merged = build_enriched_alert(alert, enrichment)
+        try:
+            event_time = datetime.fromisoformat(enrichment["enriched_at"]).timestamp()
+        except (KeyError, ValueError):
+            event_time = None
+        return splunk_hec.send_event(merged, time=event_time, source=SPLUNK_SOURCE)
+    except Exception as e:
+        print(f"[!] Unexpected error forwarding alert {alert.get('alert_id')} to Splunk: {e}")
+        return False
+
+
 # Lambda handler
 def lambda_handler(event, context):
     """
@@ -231,7 +268,13 @@ def lambda_handler(event, context):
     dynamodb = get_dynamodb()
     table    = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
-    results = {"enriched": [], "skipped": [], "errors": []}
+    results = {"enriched": [], "skipped": [], "errors": [], "sent_to_splunk": 0}
+
+    # stop trying Splunk for the rest of this run after one failure,
+    # so an unreachable HEC doesn't add a timeout to every alert
+    splunk_enabled = splunk_hec.is_configured()
+    if not splunk_enabled:
+        print("[i] HEC_URL / HEC_TOKEN not set, skipping Splunk forward")
 
     if "alert_id" in event:
         alert_id = event["alert_id"]
@@ -246,6 +289,9 @@ def lambda_handler(event, context):
             results["enriched"].append(alert_id)
         except Exception as e:
             results["errors"].append({"alert_id": alert_id, "error": str(e)})
+        else:
+            if splunk_enabled and forward_enriched_alert(alert, enrichment):
+                results["sent_to_splunk"] += 1
 
     else:
         alerts = fetch_unenriched_alerts(table)
@@ -268,8 +314,16 @@ def lambda_handler(event, context):
             except Exception as e:
                 print(f"[!] Failed to enrich {alert_id}: {e}")
                 results["errors"].append({"alert_id": alert_id, "error": str(e)})
+                continue
 
-    print(f"[*] Done -- enriched: {len(results['enriched'])}, skipped: {len(results['skipped'])}, errors: {len(results['errors'])}")
+            if splunk_enabled:
+                if forward_enriched_alert(alert, enrichment):
+                    results["sent_to_splunk"] += 1
+                else:
+                    print("[!] Splunk forward failed, skipping Splunk for the rest of this run")
+                    splunk_enabled = False
+
+    print(f"[*] Done -- enriched: {len(results['enriched'])}, skipped: {len(results['skipped'])}, errors: {len(results['errors'])}, sent to Splunk: {results['sent_to_splunk']}")
     return {"statusCode": 200, "body": json.dumps(results)}
 
 
