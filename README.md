@@ -10,7 +10,9 @@ Deployed on AWS via SAM/CloudFormation. Splunk Enterprise self-hosted on EC2.
 
 ## Dashboard
 
-![SOC Dashboard](images/dashboard.png)
+![SOC Dashboard](images/Splunk_SOC_Dashboard_1.png)
+![SOC Dashboard cont.](images/Splunk_SOC_Dashboard_2.png)
+
 
 ## Detection Rules
 
@@ -31,9 +33,11 @@ brute-force alert from a Tor exit node with a 100% abuse score gets flagged
 
 ## AWS Infrastructure
 
-![Lambda Functions](images/lambda-functions.png)
-![EC2 Instance](images/ec2-instance.png)
-![Security Group](images/security-group.png)
+![Lambda Functions](images/lambda_function.png)
+![EC2 Instance](images/EC2_instance.png)
+![Security Group](images/EC2_Security.png)
+![S3 Bucket](images/S3%20bucket.png)
+
 
 Both Lambdas forward every alert to Splunk via HTTP Event Collector, in
 addition to writing to DynamoDB. Splunk forwarding is non-blocking — a
