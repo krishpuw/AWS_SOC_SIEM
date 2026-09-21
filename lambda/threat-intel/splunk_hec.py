@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import requests
+import urllib3
 
 # Splunk HTTP Event Collector (HEC) forwarder.
 #
@@ -76,6 +77,11 @@ def send_events(payloads: list) -> bool:
         return False
 
     verify_ssl = os.environ.get("HEC_VERIFY_SSL", "true").lower() != "false"
+    if not verify_ssl:
+        # self-signed Splunk cert - requests/urllib3 warns on every unverified
+        # POST, which floods CloudWatch logs. Silence it only when we have
+        # deliberately turned verification off.
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     body = "\n".join(json.dumps(p, default=_json_default) for p in payloads)
 
     try:
