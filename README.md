@@ -45,7 +45,7 @@ Splunk outage is logged but never fails a detection run.
 
 ## Pipeline Verification
 
-![CloudWatch Logs](images/cloudwatch-logs.png)
+![CloudWatch Logs](images/Cloud_watch.png)
 
 ## Tech Stack
 
